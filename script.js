@@ -1,4 +1,4 @@
-// Aplikasi Pencatatan Keuangan
+// Aplikasi Pencatatan Keuangan dengan IndexedDB (sebagai pengganti SQLite untuk browser)
 document.addEventListener('DOMContentLoaded', function() {
     // Elemen DOM
     const form = document.getElementById('transaction-form');
@@ -12,11 +12,113 @@ document.addEventListener('DOMContentLoaded', function() {
     const expenseElement = document.getElementById('expense');
     const filterButtons = document.querySelectorAll('.filter-btn');
 
-    // Inisialisasi array transaksi
-    let transactions = JSON.parse(localStorage.getItem('transactions')) || [];
+    // Inisialisasi database IndexedDB
+    let db;
+    const dbName = 'FinancialTrackerDB';
+    const version = 1;
 
     // Inisialisasi aplikasi
     initApp();
+
+    // Inisialisasi database IndexedDB
+    function initDB() {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(dbName, version);
+
+            request.onerror = function(event) {
+                console.error('Database error:', event.target.error);
+                reject(event.target.error);
+            };
+
+            request.onsuccess = function(event) {
+                db = event.target.result;
+                resolve(db);
+            };
+
+            request.onupgradeneeded = function(event) {
+                db = event.target.result;
+
+                // Membuat object store untuk transaksi jika belum ada
+                if (!db.objectStoreNames.contains('transactions')) {
+                    const objectStore = db.createObjectStore('transactions', { keyPath: 'id' });
+                    objectStore.createIndex('date', 'date', { unique: false });
+                    objectStore.createIndex('type', 'type', { unique: false });
+                    objectStore.createIndex('category', 'category', { unique: false });
+                }
+            };
+        });
+    }
+
+    // Inisialisasi aplikasi
+    async function initApp() {
+        try {
+            await initDB();
+            await loadTransactions();
+            updateSummary();
+            renderTransactions();
+        } catch (error) {
+            console.error('Error initializing app:', error);
+        }
+    }
+
+    // Menyimpan transaksi ke IndexedDB
+    function saveTransaction(transaction) {
+        return new Promise((resolve, reject) => {
+            const transactionDb = db.transaction(['transactions'], 'readwrite');
+            const objectStore = transactionDb.objectStore('transactions');
+            const request = objectStore.add(transaction);
+
+            request.onsuccess = function() {
+                resolve(request.result);
+            };
+
+            request.onerror = function(event) {
+                reject(event.target.error);
+            };
+        });
+    }
+
+    // Memuat semua transaksi dari IndexedDB
+    function loadTransactions() {
+        return new Promise((resolve, reject) => {
+            const transactionList = [];
+            const transactionDb = db.transaction(['transactions'], 'readonly');
+            const objectStore = transactionDb.objectStore('transactions');
+            const request = objectStore.openCursor();
+
+            request.onsuccess = function(event) {
+                const cursor = event.target.result;
+                if (cursor) {
+                    transactionList.push(cursor.value);
+                    cursor.continue();
+                } else {
+                    window.transactions = transactionList; // Menyimpan sebagai variabel global agar bisa diakses fungsi lain
+                    resolve(transactionList);
+                }
+            };
+
+            request.onerror = function(event) {
+                reject(event.target.error);
+            };
+        });
+    }
+
+    // Menghapus transaksi dari IndexedDB
+    function deleteTransactionFromDB(id) {
+        return new Promise((resolve, reject) => {
+            const transactionDb = db.transaction(['transactions'], 'readwrite');
+            const objectStore = transactionDb.objectStore('transactions');
+            const request = objectStore.delete(id);
+
+            request.onsuccess = function() {
+                resolve();
+            };
+
+            request.onerror = function(event) {
+                reject(event.target.error);
+            };
+        });
+    }
 
     // Event Listener
     form.addEventListener('submit', addTransaction);
@@ -24,14 +126,8 @@ document.addEventListener('DOMContentLoaded', function() {
         button.addEventListener('click', filterTransactions);
     });
 
-    // Inisialisasi aplikasi
-    function initApp() {
-        updateSummary();
-        renderTransactions();
-    }
-
     // Menambahkan transaksi baru
-    function addTransaction(e) {
+    async function addTransaction(e) {
         e.preventDefault();
 
         // Mendapatkan nilai form
@@ -57,18 +153,23 @@ document.addEventListener('DOMContentLoaded', function() {
             date
         };
 
-        // Menambahkan ke array transaksi
-        transactions.push(transaction);
+        try {
+            // Menyimpan ke IndexedDB
+            await saveTransaction(transaction);
 
-        // Menyimpan ke localStorage
-        saveTransactions();
+            // Muat ulang transaksi
+            await loadTransactions();
 
-        // Memperbarui UI
-        renderTransactions();
-        updateSummary();
+            // Memperbarui UI
+            renderTransactions();
+            updateSummary();
 
-        // Mereset form
-        form.reset();
+            // Reset form
+            form.reset();
+        } catch (error) {
+            console.error('Error adding transaction:', error);
+            alert('Terjadi kesalahan saat menyimpan transaksi');
+        }
     }
 
     // Menghasilkan ID unik untuk transaksi
@@ -82,9 +183,9 @@ document.addEventListener('DOMContentLoaded', function() {
         transactionHistory.innerHTML = '';
 
         // Memfilter transaksi berdasarkan filter yang dipilih
-        let filteredTransactions = transactions;
+        let filteredTransactions = window.transactions || [];
         if (filter !== 'all') {
-            filteredTransactions = transactions.filter(transaction => transaction.type === filter);
+            filteredTransactions = (window.transactions || []).filter(transaction => transaction.type === filter);
         }
 
         // Memeriksa apakah ada transaksi untuk ditampilkan
@@ -106,9 +207,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
             // Dapatkan nama kategori yang dapat dibaca
             const categoryName = getCategoryName(transaction.category);
-
-            // Ubah label jenis transaksi
-            const transactionType = transaction.type === 'income' ? 'Pemasukan' : 'Pengeluaran';
 
             transactionElement.innerHTML = `
                 <div class="transaction-info">
@@ -155,6 +253,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Memperbarui ringkasan (saldo, pemasukan, pengeluaran)
     function updateSummary() {
         // Menghitung total
+        const transactions = window.transactions || [];
         const totalIncome = transactions
             .filter(transaction => transaction.type === 'income')
             .reduce((sum, transaction) => sum + transaction.amount, 0);
@@ -193,24 +292,24 @@ document.addEventListener('DOMContentLoaded', function() {
         renderTransactions(filter);
     }
 
-    // Simpan transaksi ke localStorage
-    function saveTransactions() {
-        localStorage.setItem('transactions', JSON.stringify(transactions));
-    }
-
     // Buat fungsi deleteTransaction tersedia secara global untuk onclick inline
-    window.deleteTransaction = function(id) {
+    window.deleteTransaction = async function(id) {
         // Konfirmasi penghapusan
         if (confirm('Apakah Anda yakin ingin menghapus transaksi ini?')) {
-            // Hapus transaksi dari array
-            transactions = transactions.filter(transaction => transaction.id !== id);
+            try {
+                // Hapus transaksi dari database
+                await deleteTransactionFromDB(id);
 
-            // Simpan ke localStorage
-            saveTransactions();
+                // Muat ulang transaksi
+                await loadTransactions();
 
-            // Perbarui UI
-            renderTransactions();
-            updateSummary();
+                // Perbarui UI
+                renderTransactions();
+                updateSummary();
+            } catch (error) {
+                console.error('Error deleting transaction:', error);
+                alert('Terjadi kesalahan saat menghapus transaksi');
+            }
         }
     };
 
@@ -219,6 +318,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Fungsi untuk menghasilkan laporan PDF
     async function generatePDFReport() {
+        const transactions = window.transactions || [];
+
         if (transactions.length === 0) {
             alert('Tidak ada transaksi untuk dilaporkan. Silakan tambahkan transaksi terlebih dahulu.');
             return;
